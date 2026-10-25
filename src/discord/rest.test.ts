@@ -28,8 +28,12 @@ const server = Bun.serve({
       url.searchParams.get("limit") === "100"
     ) {
       return Response.json([
-        { id: "1", author: { id: "b" }, mention_roles: ["r"] },
+        { id: "1", channel_id: "t", author: { id: "b" }, mention_roles: ["r"] },
       ]);
+    }
+
+    if (url.pathname === "/channels/broken") {
+      return Response.json({ type: 11 });
     }
 
     return new Response("missing", { status: 404 });
@@ -55,4 +59,12 @@ test("lists messages", async () => {
 
 test("maps 404 to NotFoundError", async () => {
   expect(api.message("x", "y")).rejects.toBeInstanceOf(NotFoundError);
+});
+
+test("rejects responses that do not match the schema", async () => {
+  const error = await api.channel("broken").catch((err: unknown) => err);
+
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(NotFoundError);
+  expect(String(error)).toContain("unexpected response shape");
 });

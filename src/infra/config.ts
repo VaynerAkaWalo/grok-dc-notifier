@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { Level } from "./logger.ts";
 
 export interface Config {
@@ -45,13 +46,15 @@ export function parseDuration(value: string): number | undefined {
   return ms > 0 ? ms : undefined;
 }
 
-export function loadConfig(env: Env = process.env): Config {
-  const errors: string[] = [];
-  const str = (key: string) => (env[key] ?? "").trim();
+// Every value is trimmed and an unset variable reads as "". Issues are
+// collected across all variables and reported together.
+const text = () => z.string().trim().prefault("");
 
-  const duration = (key: string, fallbackMs: number) => {
-    const raw = str(key);
+const required = (message: string) =>
+  z.string().trim().min(1, message).prefault("");
 
+const duration = (key: string, fallbackMs: number) =>
+  text().transform((raw, ctx) => {
     if (!raw) {
       return fallbackMs;
     }
@@ -59,15 +62,20 @@ export function loadConfig(env: Env = process.env): Config {
     const ms = parseDuration(raw);
 
     if (ms === undefined) {
-      errors.push(`${key} must be a positive duration like 30s`);
+      ctx.issues.push({
+        code: "custom",
+        message: `${key} must be a positive duration like 30s`,
+        input: raw,
+      });
+
+      return z.NEVER;
     }
 
-    return ms ?? fallbackMs;
-  };
+    return ms;
+  });
 
-  const integer = (key: string, fallback: number) => {
-    const raw = str(key);
-
+const integer = (key: string, fallback: number) =>
+  text().transform((raw, ctx) => {
     if (!raw) {
       return fallback;
     }
@@ -75,49 +83,76 @@ export function loadConfig(env: Env = process.env): Config {
     const n = Number(raw);
 
     if (!Number.isInteger(n) || n < 1) {
-      errors.push(`${key} must be a positive integer`);
+      ctx.issues.push({
+        code: "custom",
+        message: `${key} must be a positive integer`,
+        input: raw,
+      });
+
+      return z.NEVER;
     }
 
     return n;
-  };
+  });
 
-  const config: Config = {
-    discordToken: str("DISCORD_BOT_TOKEN"),
-    gatewayUrl: str("DISCORD_GATEWAY_URL") || "wss://gateway.discord.gg",
-    allowedUserIds: idSet(env.ALLOWED_USER_IDS),
-    allowedGuildIds: idSet(env.ALLOWED_GUILD_IDS),
-    webhookUrl: str("WEBHOOK_URL"),
-    webhookAuthHeader: str("WEBHOOK_AUTH_HEADER"),
-    webhookTimeoutMs: duration("WEBHOOK_TIMEOUT", 8_000),
-    ratePerMinute: integer("RATE_LIMIT_PER_MINUTE", 6),
-    dedupeTtlMs: duration("DEDUPE_TTL", 15 * 60_000),
-    threadNegativeTtlMs: duration("THREAD_NEGATIVE_TTL", 30 * 60_000),
-    staleAfterMs: duration("STALE_AFTER", 3 * 60_000),
-    port: integer("PORT", 8080),
-    logLevel: str("LOG_LEVEL") === "debug" ? "debug" : "info",
-  };
-
-  if (!config.discordToken) {
-    errors.push("DISCORD_BOT_TOKEN is required");
-  }
-
-  if (config.allowedUserIds.size === 0) {
-    errors.push("ALLOWED_USER_IDS must list at least one Discord user ID");
-  }
-
-  if (!/^https?:\/\/[^\s]+$/.test(config.webhookUrl)) {
-    errors.push("WEBHOOK_URL must be an http(s) URL");
-  }
-
-  if (!config.webhookAuthHeader) {
-    errors.push(
+export const envSchema = z
+  .object({
+    DISCORD_BOT_TOKEN: required("DISCORD_BOT_TOKEN is required"),
+    ALLOWED_USER_IDS: text()
+      .transform(idSet)
+      .refine((ids) => ids.size > 0, {
+        message: "ALLOWED_USER_IDS must list at least one Discord user ID",
+      }),
+    WEBHOOK_URL: z
+      .string()
+      .trim()
+      .regex(/^https?:\/\/[^\s]+$/, "WEBHOOK_URL must be an http(s) URL")
+      .prefault(""),
+    WEBHOOK_AUTH_HEADER: required(
       "WEBHOOK_AUTH_HEADER is required (full Authorization header value)",
+    ),
+    ALLOWED_GUILD_IDS: text().transform(idSet),
+    DISCORD_GATEWAY_URL: text().transform(
+      (url) => url || "wss://gateway.discord.gg",
+    ),
+    WEBHOOK_TIMEOUT: duration("WEBHOOK_TIMEOUT", 8_000),
+    RATE_LIMIT_PER_MINUTE: integer("RATE_LIMIT_PER_MINUTE", 6),
+    DEDUPE_TTL: duration("DEDUPE_TTL", 15 * 60_000),
+    THREAD_NEGATIVE_TTL: duration("THREAD_NEGATIVE_TTL", 30 * 60_000),
+    STALE_AFTER: duration("STALE_AFTER", 3 * 60_000),
+    PORT: integer("PORT", 8080),
+    LOG_LEVEL: text().transform(
+      (level): Level => (level === "debug" ? "debug" : "info"),
+    ),
+  })
+  .transform(
+    (env): Config => ({
+      discordToken: env.DISCORD_BOT_TOKEN,
+      gatewayUrl: env.DISCORD_GATEWAY_URL,
+      allowedUserIds: env.ALLOWED_USER_IDS,
+      allowedGuildIds: env.ALLOWED_GUILD_IDS,
+      webhookUrl: env.WEBHOOK_URL,
+      webhookAuthHeader: env.WEBHOOK_AUTH_HEADER,
+      webhookTimeoutMs: env.WEBHOOK_TIMEOUT,
+      ratePerMinute: env.RATE_LIMIT_PER_MINUTE,
+      dedupeTtlMs: env.DEDUPE_TTL,
+      threadNegativeTtlMs: env.THREAD_NEGATIVE_TTL,
+      staleAfterMs: env.STALE_AFTER,
+      port: env.PORT,
+      logLevel: env.LOG_LEVEL,
+    }),
+  );
+
+// Throws one error listing every invalid variable. Messages name variables,
+// never their values.
+export function loadConfig(env: Env = process.env): Config {
+  const parsed = envSchema.safeParse(env);
+
+  if (!parsed.success) {
+    throw new Error(
+      parsed.error.issues.map((issue) => issue.message).join("; "),
     );
   }
 
-  if (errors.length > 0) {
-    throw new Error(errors.join("; "));
-  }
-
-  return config;
+  return parsed.data;
 }

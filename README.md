@@ -4,8 +4,10 @@ Holds one Discord Gateway session for a bot and POSTs selected messages to a
 Grok Bot webhook routine, so the routine wakes up when someone talks to the bot.
 Run exactly one replica: a second Gateway session would forward every message twice.
 
-Built on Bun with no runtime dependencies: its own Gateway client on Bun's
-WebSocket, `fetch` for REST and the webhook, and `Bun.serve` for health checks.
+Built on Bun with one runtime dependency, [zod](https://zod.dev), which validates
+the configuration and every Discord payload the notifier reads. Everything else
+is Bun: its own Gateway client on Bun's WebSocket, `fetch` for REST and the
+webhook, and `Bun.serve` for health checks.
 
 ## What gets forwarded
 
@@ -69,6 +71,9 @@ The request carries `Content-Type: application/json` and
 | `STALE_AFTER`           | no       | `3m`                        |
 | `PORT`                  | no       | `8080`                      |
 | `LOG_LEVEL`             | no       | `info` (`debug` logs skips) |
+
+Invalid configuration stops the process with exit code 2 and one error that
+names every bad variable, never its value.
 
 `/healthz` (liveness) fails when the Gateway has been silent for `STALE_AFTER`.
 `/readyz` fails while no session is ready. Close codes that a reconnect cannot fix
