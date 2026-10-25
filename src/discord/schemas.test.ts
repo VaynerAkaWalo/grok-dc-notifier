@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   channelSchema,
+  failedFieldPaths,
   guildSchema,
-  issuePaths,
   messageSchema,
-} from "./types.ts";
+} from "./schemas.ts";
 
 test("message schema keeps read fields and strips the rest", () => {
   const message = messageSchema.parse({
@@ -63,7 +63,7 @@ test("channel and guild schemas", () => {
   expect(guild.threads).toBeUndefined();
 });
 
-test("issuePaths reports field paths without values", () => {
+test("failedFieldPaths reports field paths without values", () => {
   const result = messageSchema.safeParse({
     id: "1",
     channel_id: 2,
@@ -74,7 +74,7 @@ test("issuePaths reports field paths without values", () => {
 
   expect(result.success).toBe(false);
 
-  const paths = result.success ? [] : issuePaths(result.error);
+  const paths = result.success ? [] : failedFieldPaths(result.error);
 
   expect(paths).toEqual(["channel_id", "author.id", "mentions.0.id"]);
   expect(paths.join()).not.toContain("secret");

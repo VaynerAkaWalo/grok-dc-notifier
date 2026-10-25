@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { createRest, NotFoundError } from "./rest.ts";
+import { DiscordRestClient, NotFoundError } from "./rest-client.ts";
 
 let limitedHits = 0;
 
@@ -42,7 +42,10 @@ const server = Bun.serve({
 
 afterAll(() => server.stop(true));
 
-const api = createRest({ token: "tok", baseUrl: server.url.origin });
+const api = new DiscordRestClient({
+  token: "tok",
+  baseUrl: server.url.origin,
+});
 
 test("retries after 429", async () => {
   const channel = await api.channel("limited");
