@@ -2,6 +2,7 @@
 // one session alive with heartbeats, resumes on resume_gateway_url after drops
 // and re-identifies when the session cannot be resumed.
 
+import { z } from "zod";
 import type { Logger } from "../infra/logger.ts";
 
 // GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
@@ -43,11 +44,46 @@ export class FatalGatewayError extends Error {
   }
 }
 
-interface Payload {
-  op: number;
-  d?: unknown;
-  s?: number | null;
-  t?: string | null;
+export const payloadSchema = z.object({
+  op: z.number(),
+  d: z.unknown().optional(),
+  s: z.number().nullish(),
+  t: z.string().nullish(),
+});
+
+type Payload = z.infer<typeof payloadSchema>;
+
+export const helloSchema = z.object({
+  heartbeat_interval: z.number().positive(),
+});
+
+// READY fields are all optional; missing or malformed ones read as undefined
+// and the client falls back to empty strings.
+export const readySchema = z.object({
+  session_id: z.string().optional().catch(undefined),
+  resume_gateway_url: z.string().optional().catch(undefined),
+  user: z
+    .object({
+      id: z.string().optional().catch(undefined),
+      username: z.string().optional().catch(undefined),
+    })
+    .optional()
+    .catch(undefined),
+});
+
+// Parses one text frame; undefined when it is not JSON or not a payload.
+export function decodeFrame(raw: string): Payload | undefined {
+  let json: unknown;
+
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+
+  const parsed = payloadSchema.safeParse(json);
+
+  return parsed.success ? parsed.data : undefined;
 }
 
 // Receives every dispatch event (including READY). Must not block.
@@ -227,11 +263,9 @@ export class GatewayClient {
       };
 
       ws.addEventListener("message", (event) => {
-        let payload: Payload;
+        const payload = decodeFrame(String(event.data));
 
-        try {
-          payload = JSON.parse(String(event.data)) as Payload;
-        } catch {
+        if (!payload) {
           this.options.log.error("undecodable gateway frame");
 
           return;
@@ -247,14 +281,15 @@ export class GatewayClient {
           case op.hello: {
             clearTimeout(handshakeTimer);
 
-            const interval = (payload.d as { heartbeat_interval?: number })
-              ?.heartbeat_interval;
+            const hello = helloSchema.safeParse(payload.d);
 
-            if (!interval || interval <= 0) {
+            if (!hello.success) {
               closeWith(resumableClose, "bad HELLO");
 
               return;
             }
+
+            const interval = hello.data.heartbeat_interval;
 
             if (resuming) {
               send(op.resume, {
@@ -334,11 +369,7 @@ export class GatewayClient {
     const type = payload.t ?? "";
 
     if (type === "READY") {
-      const ready = payload.d as {
-        session_id?: string;
-        resume_gateway_url?: string;
-        user?: { id?: string; username?: string };
-      };
+      const ready = readySchema.catch({}).parse(payload.d);
 
       this.sessionId = ready.session_id ?? "";
       this.resumeUrl = ready.resume_gateway_url?.trim() ?? "";

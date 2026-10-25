@@ -9,13 +9,20 @@
 // A thread is engaged when it was started from a bot message, the bot created
 // it, the bot was mentioned in it, or the bot posted in it.
 
+import type { z } from "zod";
 import { type DiscordApi, NotFoundError } from "../discord/rest.ts";
 import {
   type Channel,
-  type Guild,
+  channelSchema,
+  guildSchema,
+  issuePaths,
   isThread,
   type Message,
-  type Role,
+  messageSchema,
+  type ReferencedMessage,
+  roleDeleteSchema,
+  roleEventSchema,
+  threadListSyncSchema,
 } from "../discord/types.ts";
 import type { Logger } from "../infra/logger.ts";
 import type { Dedupe, Limiter } from "./limits.ts";
@@ -80,7 +87,7 @@ const handledEvents = new Set([
 const maxPendingEvents = 1024;
 const maxPendingPosts = 32;
 
-const authorOf = (message: Message): Author => ({
+const authorOf = (message: Message | ReferencedMessage): Author => ({
   id: message.author.id,
   username: message.author.username ?? "",
 });
@@ -163,6 +170,27 @@ export class Relay {
     }
   }
 
+  // Validates a dispatch payload. Invalid payloads are logged by field path
+  // only (never values) and skipped.
+  private parse<T>(
+    type: string,
+    schema: z.ZodType<T>,
+    data: unknown,
+  ): T | undefined {
+    const parsed = schema.safeParse(data);
+
+    if (!parsed.success) {
+      this.options.log.warn("invalid payload, skipping", {
+        event: type,
+        fields: issuePaths(parsed.error),
+      });
+
+      return undefined;
+    }
+
+    return parsed.data;
+  }
+
   async process(type: string, data: unknown, botUserId: string) {
     const state = this.state;
 
@@ -170,7 +198,11 @@ export class Relay {
 
     switch (type) {
       case "GUILD_CREATE": {
-        const guild = data as Guild;
+        const guild = this.parse(type, guildSchema, data);
+
+        if (!guild) {
+          break;
+        }
 
         for (const role of guild.roles ?? []) {
           state.role(role);
@@ -193,30 +225,64 @@ export class Relay {
         break;
       }
       case "GUILD_ROLE_CREATE":
-      case "GUILD_ROLE_UPDATE":
-        state.role((data as { role: Role }).role);
+      case "GUILD_ROLE_UPDATE": {
+        const event = this.parse(type, roleEventSchema, data);
+
+        if (event) {
+          state.role(event.role);
+        }
+
         break;
-      case "GUILD_ROLE_DELETE":
-        state.botRoles.delete((data as { role_id: string }).role_id);
+      }
+      case "GUILD_ROLE_DELETE": {
+        const event = this.parse(type, roleDeleteSchema, data);
+
+        if (event) {
+          state.botRoles.delete(event.role_id);
+        }
+
         break;
+      }
       case "CHANNEL_CREATE":
       case "CHANNEL_UPDATE":
       case "THREAD_CREATE":
-      case "THREAD_UPDATE":
-        state.channel(data as Channel);
+      case "THREAD_UPDATE": {
+        const channel = this.parse(type, channelSchema, data);
+
+        if (channel) {
+          state.channel(channel);
+        }
+
         break;
+      }
       case "CHANNEL_DELETE":
-      case "THREAD_DELETE":
-        state.forget((data as Channel).id);
+      case "THREAD_DELETE": {
+        const channel = this.parse(type, channelSchema, data);
+
+        if (channel) {
+          state.forget(channel.id);
+        }
+
         break;
-      case "THREAD_LIST_SYNC":
-        for (const thread of (data as { threads?: Channel[] }).threads ?? []) {
+      }
+      case "THREAD_LIST_SYNC": {
+        const event = this.parse(type, threadListSyncSchema, data);
+
+        for (const thread of event?.threads ?? []) {
           state.channel(thread);
         }
+
         break;
-      case "MESSAGE_CREATE":
-        await this.message(data as Message);
+      }
+      case "MESSAGE_CREATE": {
+        const message = this.parse(type, messageSchema, data);
+
+        if (message) {
+          await this.message(message);
+        }
+
         break;
+      }
     }
   }
 

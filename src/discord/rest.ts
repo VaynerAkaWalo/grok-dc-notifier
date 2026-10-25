@@ -1,4 +1,10 @@
-import type { Channel, Message } from "./types.ts";
+import type { z } from "zod";
+import {
+  type Channel,
+  channelSchema,
+  type Message,
+  messageSchema,
+} from "./types.ts";
 
 // Returned for 404 and 403 (no access) responses.
 export class NotFoundError extends Error {
@@ -26,7 +32,7 @@ export function createRest(options: RestOptions): DiscordApi {
   const doFetch = options.fetch ?? fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
 
-  const get = async <T>(path: string): Promise<T> => {
+  const get = async <T>(path: string, schema: z.ZodType<T>): Promise<T> => {
     for (let attempt = 0; ; attempt++) {
       const res = await doFetch(baseUrl + path, {
         headers: {
@@ -60,17 +66,29 @@ export function createRest(options: RestOptions): DiscordApi {
         throw new Error(`GET ${path}: status ${res.status}`);
       }
 
-      return (await res.json()) as T;
+      const parsed = schema.safeParse(await res.json());
+
+      if (!parsed.success) {
+        throw new Error(`GET ${path}: unexpected response shape`);
+      }
+
+      return parsed.data;
     }
   };
 
   const id = encodeURIComponent;
 
   return {
-    channel: (channelId) => get(`/channels/${id(channelId)}`),
+    channel: (channelId) => get(`/channels/${id(channelId)}`, channelSchema),
     message: (channelId, messageId) =>
-      get(`/channels/${id(channelId)}/messages/${id(messageId)}`),
+      get(
+        `/channels/${id(channelId)}/messages/${id(messageId)}`,
+        messageSchema,
+      ),
     messages: (channelId, limit) =>
-      get(`/channels/${id(channelId)}/messages?limit=${limit}`),
+      get(
+        `/channels/${id(channelId)}/messages?limit=${limit}`,
+        messageSchema.array(),
+      ),
   };
 }

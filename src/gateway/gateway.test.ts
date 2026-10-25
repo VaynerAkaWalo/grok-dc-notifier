@@ -1,7 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { silentLogger } from "../infra/logger.ts";
-import { FatalGatewayError, GatewayClient, intents } from "./gateway.ts";
+import {
+  decodeFrame,
+  FatalGatewayError,
+  GatewayClient,
+  helloSchema,
+  intents,
+  readySchema,
+} from "./gateway.ts";
 
 interface Conn {
   index: number;
@@ -248,4 +255,44 @@ test("stops on authentication failure", async () => {
 
   expect(error).toBeInstanceOf(FatalGatewayError);
   expect(error.code).toBe(4004);
+});
+
+test("decodes gateway frames with the payload schema", () => {
+  expect(decodeFrame('{"op":0,"s":5,"t":"READY","d":{}}')).toEqual({
+    op: 0,
+    s: 5,
+    t: "READY",
+    d: {},
+  });
+  expect(decodeFrame('{"op":11}')).toEqual({ op: 11 });
+  expect(decodeFrame("not json")).toBeUndefined();
+  expect(decodeFrame('{"op":"0"}')).toBeUndefined();
+  expect(decodeFrame("[]")).toBeUndefined();
+});
+
+test("HELLO needs a positive heartbeat interval", () => {
+  expect(helloSchema.safeParse({ heartbeat_interval: 41_250 }).success).toBe(
+    true,
+  );
+  expect(helloSchema.safeParse({ heartbeat_interval: 0 }).success).toBe(false);
+  expect(helloSchema.safeParse({}).success).toBe(false);
+  expect(helloSchema.safeParse(null).success).toBe(false);
+});
+
+test("READY tolerates missing or malformed fields", () => {
+  expect(
+    readySchema.parse({
+      session_id: "s",
+      resume_gateway_url: "wss://r",
+      user: { id: "1", username: "bot", avatar: null },
+    }),
+  ).toEqual({
+    session_id: "s",
+    resume_gateway_url: "wss://r",
+    user: { id: "1", username: "bot" },
+  });
+  expect(readySchema.parse({ session_id: 1, user: { id: 2 } })).toEqual({
+    session_id: undefined,
+    user: { id: undefined },
+  });
 });

@@ -6,7 +6,11 @@ ENV NODE_ENV=production
 # No runtime transpiler cache, so the container runs on a read-only root filesystem.
 ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 
-COPY package.json tsconfig.json ./
+# Runtime dependencies only, pinned by bun.lock.
+COPY package.json bun.lock ./
+RUN bun install --production --frozen-lockfile --ignore-scripts
+
+COPY tsconfig.json ./
 COPY src ./src
 
 USER bun

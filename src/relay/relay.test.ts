@@ -381,3 +381,55 @@ test("never logs message contents", async () => {
   expect(lines.length).toBeGreaterThan(0);
   expect(lines.join("")).not.toContain("top secret");
 });
+
+test("skips invalid payloads and logs only field paths", async () => {
+  const lines: string[] = [];
+  const relay = new Relay({
+    allowedUserIds: new Set([alice]),
+    allowedGuildIds: new Set(),
+    api: new FakeApi(),
+    dedupe: new Dedupe(60_000),
+    limiter: new Limiter(10),
+    negativeTtlMs: 1,
+    webhookUrl: "http://unused",
+    webhookAuthHeader: "Bearer test",
+    webhookTimeoutMs: 1_000,
+    log: createLogger("test", "debug", (line) => lines.push(line)),
+  });
+  const posted: WebhookEvent[] = [];
+
+  relay.post = async (event) => {
+    posted.push(event);
+  };
+  relay.handle(
+    "MESSAGE_CREATE",
+    { id: "1", author: { id: alice }, content: "top secret" },
+    bot,
+  );
+  relay.handle("GUILD_ROLE_DELETE", { role_id: 7 }, bot);
+  relay.handle(
+    "MESSAGE_CREATE",
+    { ...message("2", alice, "dm"), guild_id: null, content: "ok" },
+    bot,
+  );
+  await relay.idle();
+
+  const invalid = lines
+    .map((line) => JSON.parse(line))
+    .filter((line) => line.msg === "invalid payload, skipping");
+
+  expect(invalid).toEqual([
+    expect.objectContaining({
+      event: "MESSAGE_CREATE",
+      fields: ["channel_id"],
+    }),
+    expect.objectContaining({
+      event: "GUILD_ROLE_DELETE",
+      fields: ["role_id"],
+    }),
+  ]);
+  expect(lines.join("")).not.toContain("top secret");
+  expect(posted.map((event) => [event.message_id, event.trigger])).toEqual([
+    ["2", "dm"],
+  ]);
+});
