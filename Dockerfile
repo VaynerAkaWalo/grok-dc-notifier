@@ -1,11 +1,16 @@
-FROM oven/bun:1.4.4-alpine
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4-alpine AS deps
+WORKDIR /app
 
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production --ignore-scripts
+
+FROM oven/bun:1.4.4-alpine
 WORKDIR /app
 
 ENV NODE_ENV=production
-# No runtime transpiler cache, so the container runs on a read-only root filesystem.
 ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 
+COPY --from=deps /app/node_modules ./node_modules
 COPY package.json tsconfig.json ./
 COPY src ./src
 

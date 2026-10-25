@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { type DiscordApi, NotFoundError } from "../discord/rest.ts";
-import type { Channel, Message } from "../discord/types.ts";
+import { type DiscordApi, NotFoundError } from "../discord/rest-client.ts";
+import type { Channel, Message } from "../discord/schemas.ts";
 import { createLogger, silentLogger } from "../infra/logger.ts";
-import { Dedupe, Limiter } from "./limits.ts";
-import { Relay, toWebhookEvent, type WebhookEvent } from "./relay.ts";
+import { createRelay } from "./create-relay.ts";
+import { Dedupe } from "./dedupe.ts";
+import { RateLimiter } from "./rate-limiter.ts";
+import type { WebhookEvent } from "./webhook-event.ts";
 
-// Obviously fake IDs.
 const bot = "999";
 const alice = "1";
 const guild = "111111111111111111";
@@ -54,29 +55,22 @@ class FakeApi implements DiscordApi {
 
 function setup(api = new FakeApi(), perMinute = 100) {
   const posted: WebhookEvent[] = [];
-  const relay = new Relay({
+  const relay = createRelay({
     allowedUserIds: new Set([alice, "2"]),
     allowedGuildIds: new Set([guild]),
     api,
     dedupe: new Dedupe(60_000),
-    limiter: new Limiter(perMinute),
+    limiter: new RateLimiter(perMinute),
     negativeTtlMs: 30 * 60_000,
-    webhookUrl: "http://unused",
-    webhookAuthHeader: "Bearer test",
-    webhookTimeoutMs: 1_000,
+    webhook: { send: async (event) => void posted.push(event) },
     log: silentLogger,
   });
-
-  relay.post = async (event) => {
-    posted.push(event);
-  };
 
   const send = async (type: string, data: unknown) => {
     relay.handle(type, data, bot);
     await relay.idle();
   };
 
-  // Returns the trigger of the single forwarded event, or undefined.
   const forwarded = async (data: Partial<Message> & { id: string }) => {
     const before = posted.length;
 
@@ -292,80 +286,23 @@ test("rate limit drops messages over the per-minute budget", async () => {
   expect(await forwarded(dm("r3"))).toBeUndefined();
 });
 
-test("posts the event with the configured Authorization header", async () => {
-  let seen:
-    | { auth: string | null; type: string | null; body: unknown }
-    | undefined;
-  const server = Bun.serve({
-    port: 0,
-    async fetch(req) {
-      seen = {
-        auth: req.headers.get("authorization"),
-        type: req.headers.get("content-type"),
-        body: await req.json(),
-      };
-
-      return new Response("ok");
-    },
-  });
-  const relay = new Relay({
-    allowedUserIds: new Set(),
-    allowedGuildIds: new Set(),
-    api: new FakeApi(),
-    dedupe: new Dedupe(1),
-    limiter: new Limiter(1),
-    negativeTtlMs: 1,
-    webhookUrl: server.url.href,
-    webhookAuthHeader: "Bearer secret",
-    webhookTimeoutMs: 1_000,
-    log: silentLogger,
-  });
-  const event = toWebhookEvent(
-    message("42", alice, "t", {
-      referenced_message: message("41", bot, "t", { content: "prev" }),
-    }),
-    "engaged_thread",
-    { id: "t", type: 11, parent_id: general },
-  );
-
-  await relay.post(event);
-  server.stop(true);
-
-  expect(seen?.auth).toBe("Bearer secret");
-  expect(seen?.type).toBe("application/json");
-  expect(seen?.body).toMatchObject({
-    trigger: "engaged_thread",
-    guild_id: guild,
-    channel_id: "t",
-    thread_id: "t",
-    parent_id: general,
-    message_id: "42",
-    author: { id: alice, username: "user1" },
-    content: "hej",
-    referenced_message: {
-      message_id: "41",
-      author: { id: bot },
-      content: "prev",
-    },
-  });
-});
-
 test("never logs message contents", async () => {
   const lines: string[] = [];
-  const relay = new Relay({
+  const posted: WebhookEvent[] = [];
+  const relay = createRelay({
     allowedUserIds: new Set([alice]),
     allowedGuildIds: new Set(),
     api: new FakeApi(),
     dedupe: new Dedupe(60_000),
-    limiter: new Limiter(10),
+    limiter: new RateLimiter(10),
     negativeTtlMs: 1,
-    webhookUrl: "http://unused",
-    webhookAuthHeader: "Bearer test",
-    webhookTimeoutMs: 1_000,
-    log: createLogger("test", "debug", (line) => lines.push(line)),
+    webhook: { send: async (event) => void posted.push(event) },
+    log: createLogger(
+      { service: "test", level: "debug" },
+      { write: (line) => lines.push(line) },
+    ),
   });
 
-  relay.post = async () => {};
   relay.handle(
     "MESSAGE_CREATE",
     message("1", alice, "dm", { guild_id: undefined, content: "top secret" }),
@@ -380,4 +317,53 @@ test("never logs message contents", async () => {
 
   expect(lines.length).toBeGreaterThan(0);
   expect(lines.join("")).not.toContain("top secret");
+});
+
+test("skips invalid payloads and logs only field paths", async () => {
+  const lines: string[] = [];
+  const posted: WebhookEvent[] = [];
+  const relay = createRelay({
+    allowedUserIds: new Set([alice]),
+    allowedGuildIds: new Set(),
+    api: new FakeApi(),
+    dedupe: new Dedupe(60_000),
+    limiter: new RateLimiter(10),
+    negativeTtlMs: 1,
+    webhook: { send: async (event) => void posted.push(event) },
+    log: createLogger(
+      { service: "test", level: "debug" },
+      { write: (line) => lines.push(line) },
+    ),
+  });
+  relay.handle(
+    "MESSAGE_CREATE",
+    { id: "1", author: { id: alice }, content: "top secret" },
+    bot,
+  );
+  relay.handle("GUILD_ROLE_DELETE", { role_id: 7 }, bot);
+  relay.handle(
+    "MESSAGE_CREATE",
+    { ...message("2", alice, "dm"), guild_id: null, content: "ok" },
+    bot,
+  );
+  await relay.idle();
+
+  const invalid = lines
+    .map((line) => JSON.parse(line))
+    .filter((line) => line.msg === "invalid payload, skipping");
+
+  expect(invalid).toEqual([
+    expect.objectContaining({
+      event: "MESSAGE_CREATE",
+      fields: ["channel_id"],
+    }),
+    expect.objectContaining({
+      event: "GUILD_ROLE_DELETE",
+      fields: ["role_id"],
+    }),
+  ]);
+  expect(lines.join("")).not.toContain("top secret");
+  expect(posted.map((event) => [event.message_id, event.trigger])).toEqual([
+    ["2", "dm"],
+  ]);
 });

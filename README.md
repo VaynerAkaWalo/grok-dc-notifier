@@ -4,8 +4,11 @@ Holds one Discord Gateway session for a bot and POSTs selected messages to a
 Grok Bot webhook routine, so the routine wakes up when someone talks to the bot.
 Run exactly one replica: a second Gateway session would forward every message twice.
 
-Built on Bun with no runtime dependencies: its own Gateway client on Bun's
-WebSocket, `fetch` for REST and the webhook, and `Bun.serve` for health checks.
+Built on Bun with two runtime dependencies: [zod](https://zod.dev) validates the
+configuration and every Discord payload the notifier reads, and
+[pino](https://getpino.io) writes the logs. Everything else is Bun: its own
+Gateway client on Bun's WebSocket, `fetch` for REST and the webhook, and
+`Bun.serve` for health checks.
 
 ## What gets forwarded
 
@@ -26,8 +29,9 @@ Negative answers are cached for `THREAD_NEGATIVE_TTL`; a later mention or bot po
 flips them at once.
 
 Duplicate message IDs are dropped for `DEDUPE_TTL`, and at most
-`RATE_LIMIT_PER_MINUTE` messages are forwarded in any 60 s window. Logs are JSON
-lines with IDs and lengths, never message contents.
+`RATE_LIMIT_PER_MINUTE` messages are forwarded in any 60 s window. Logs are pino
+JSON lines (numeric `level`, `time`, `service`, `msg`) with IDs and lengths, never
+message contents or secrets; errors are logged as `type`, `message` and `stack` only.
 
 ## Webhook body
 
@@ -67,8 +71,15 @@ The request carries `Content-Type: application/json` and
 | `THREAD_NEGATIVE_TTL`   | no       | `30m`                       |
 | `WEBHOOK_TIMEOUT`       | no       | `8s`                        |
 | `STALE_AFTER`           | no       | `3m`                        |
+| `DISCORD_GATEWAY_URL`   | no       | `wss://gateway.discord.gg`  |
 | `PORT`                  | no       | `8080`                      |
 | `LOG_LEVEL`             | no       | `info` (`debug` logs skips) |
+| `APP_NAME`              | no       | `grok-dc-notifier`          |
+
+`LOG_LEVEL` accepts `trace`, `debug`, `info`, `warn`, `error` or `fatal`.
+
+Invalid configuration stops the process with exit code 2 and one error that
+names every bad variable, never its value.
 
 `/healthz` (liveness) fails when the Gateway has been silent for `STALE_AFTER`.
 `/readyz` fails while no session is ready. Close codes that a reconnect cannot fix
@@ -83,6 +94,17 @@ filesystem. Idle memory is about 30 MB RSS.
 Create an application in the Discord Developer Portal, enable the
 **Message Content Intent** on its Bot page, and invite it with the `bot` scope and
 View Channels, Send Messages, Send Messages in Threads and Read Message History.
+
+## Layout
+
+| directory      | contents                                                            |
+| -------------- | ------------------------------------------------------------------- |
+| `src/app`      | `Application` wiring and lifecycle, `HealthCheck` endpoints         |
+| `src/infra`    | zod env schema and grouped `config`, pino `createLogger`            |
+| `src/discord`  | zod payload schemas, `DiscordRestClient`                            |
+| `src/gateway`  | `GatewayClient` reconnect loop, `GatewayConnection`, `Heartbeat`, `GatewaySession`, `Backoff` |
+| `src/relay`    | `Relay` event queue, `EventRouter`, `MessageHandler`, `ThreadEngagement`, `Forwarder`, `WebhookClient` |
+| `src/state`    | in-memory caches: `BotIdentity`, `EngagementCache`, `BotRelatedMessages` |
 
 ## Development
 
