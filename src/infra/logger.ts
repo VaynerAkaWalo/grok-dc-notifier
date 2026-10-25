@@ -1,44 +1,47 @@
-// Tiny JSON-lines logger. Never pass message contents or secrets as fields.
+import { type DestinationStream, type Logger, pino } from "pino";
 
-const levels = { debug: 20, info: 30, warn: 40, error: 50 } as const;
+export type { Logger };
 
-export type Level = keyof typeof levels;
-export type Fields = Record<string, unknown>;
+export const logLevels = [
+  "trace",
+  "debug",
+  "info",
+  "warn",
+  "error",
+  "fatal",
+] as const;
 
-export interface Logger {
-  debug(msg: string, fields?: Fields): void;
-  info(msg: string, fields?: Fields): void;
-  warn(msg: string, fields?: Fields): void;
-  error(msg: string, fields?: Fields): void;
+export type LogLevel = (typeof logLevels)[number];
+
+export interface LoggerOptions {
+  service: string;
+  level: LogLevel;
 }
+
+const errorWithoutExtraProperties = (err: Error) => ({
+  type: err.name,
+  message: err.message,
+  stack: err.stack,
+});
 
 export function createLogger(
-  service: string,
-  level: Level = "info",
-  write: (line: string) => void = (line) => process.stdout.write(line),
+  options: LoggerOptions,
+  destination?: DestinationStream,
 ): Logger {
-  const min = levels[level];
+  return pino(
+    {
+      level: options.level,
 
-  const emit = (lvl: Level, msg: string, fields?: Fields) => {
-    if (levels[lvl] < min) {
-      return;
-    }
+      base: {
+        service: options.service,
+      },
 
-    const err = fields?.err;
-    const extra =
-      err instanceof Error ? { ...fields, err: err.message } : fields;
-
-    write(
-      `${JSON.stringify({ level: lvl, time: new Date().toISOString(), service, msg, ...extra })}\n`,
-    );
-  };
-
-  return {
-    debug: (msg, fields) => emit("debug", msg, fields),
-    info: (msg, fields) => emit("info", msg, fields),
-    warn: (msg, fields) => emit("warn", msg, fields),
-    error: (msg, fields) => emit("error", msg, fields),
-  };
+      serializers: {
+        err: errorWithoutExtraProperties,
+      },
+    },
+    destination,
+  );
 }
 
-export const silentLogger: Logger = createLogger("test", "error", () => {});
+export const silentLogger: Logger = pino({ level: "silent" });

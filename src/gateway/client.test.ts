@@ -1,14 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { silentLogger } from "../infra/logger.ts";
+import { GatewayClient } from "./client.ts";
 import {
   decodeFrame,
   FatalGatewayError,
-  GatewayClient,
   helloSchema,
   intents,
+  parseReady,
   readySchema,
-} from "./gateway.ts";
+} from "./protocol.ts";
 
 interface Conn {
   index: number;
@@ -27,8 +28,6 @@ afterEach(() => {
   }
 });
 
-// A fake gateway: sends HELLO, ACKs heartbeats (unless ackHeartbeats is false)
-// and passes every other frame to the script.
 function fakeGateway(
   script: Script,
   options = { ackHeartbeats: true, heartbeatMs: 100 },
@@ -295,4 +294,5 @@ test("READY tolerates missing or malformed fields", () => {
     session_id: undefined,
     user: { id: undefined },
   });
+  expect(parseReady(null)).toEqual({});
 });

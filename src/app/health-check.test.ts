@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { createHealthHandler } from "./app.ts";
+import { HealthCheck } from "./health-check.ts";
 
 test("health endpoints follow gateway state", () => {
   const gateway = { connected: false, last: 0 };
-  const handler = createHealthHandler(
+  const health = new HealthCheck(
     {
       isConnected: () => gateway.connected,
       lastActivityAt: () => gateway.last,
@@ -11,7 +11,8 @@ test("health endpoints follow gateway state", () => {
     1_000,
     () => 500,
   );
-  const get = (path: string) => handler(new Request(`http://x${path}`)).status;
+  const get = (path: string) =>
+    health.handle(new Request(`http://x${path}`)).status;
 
   expect(get("/healthz")).toBe(200);
   expect(get("/readyz")).toBe(503);
@@ -22,4 +23,7 @@ test("health endpoints follow gateway state", () => {
   expect(get("/readyz")).toBe(200);
   expect(get("/healthz")).toBe(503);
   expect(get("/other")).toBe(404);
+  expect(
+    health.handle(new Request("http://x/healthz", { method: "POST" })).status,
+  ).toBe(405);
 });
