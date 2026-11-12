@@ -7,12 +7,12 @@ import {
 } from "../discord/rest-client.ts";
 
 const guildId = "1561814224538304512";
-const snowflake = z.string().regex(/^[1-9]\d{0,19}$/);
-const messageBody = z.strictObject({
+export const snowflake = z.string().regex(/^[1-9]\d{0,19}$/);
+export const messageBody = z.strictObject({
   content: z.string().min(1).max(2000),
   reply_to: snowflake.optional(),
 });
-const threadBody = z.strictObject({
+export const threadBody = z.strictObject({
   name: z.string().trim().min(1).max(100),
   auto_archive_duration: z
     .union([z.literal(60), z.literal(1440), z.literal(4320), z.literal(10080)])
@@ -54,7 +54,7 @@ export class RelayApi {
     private readonly token?: string,
   ) {}
 
-  handle = async (req: Request): Promise<Response> => {
+  authorize(req: Request): Response | undefined {
     if (!this.token)
       return Response.json({ error: "relay API disabled" }, { status: 503 });
 
@@ -70,6 +70,11 @@ export class RelayApi {
         { status: 401, headers: { "WWW-Authenticate": "Bearer" } },
       );
     }
+  }
+
+  handle = async (req: Request): Promise<Response> => {
+    const unauthorized = this.authorize(req);
+    if (unauthorized) return unauthorized;
 
     try {
       return await this.route(req);

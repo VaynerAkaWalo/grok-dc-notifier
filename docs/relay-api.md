@@ -38,6 +38,43 @@ and other errors on writes are not retried. A failed response can follow a
 successful write, so inspect history or the source message's thread before
 retrying a message or thread creation to avoid duplicates. Reactions are idempotent.
 
+## MCP connector
+
+The Streamable HTTP endpoint is
+`https://grok-dc-notifier.blamedevs.com/api/mcp`. Configure a client or connector
+with `Authorization: Bearer <RELAY_API_TOKEN>` on every request. Reuse the relay
+API token, never the Discord bot token. No new secret or HTTPRoute change is needed.
+
+The official `@modelcontextprotocol/sdk` Web Standard transport runs on Bun.
+The endpoint is stateless and returns JSON responses. Clients must accept both
+`application/json` and `text/event-stream` as required by Streamable HTTP.
+There are no persistent sessions, resumable streams or server notifications.
+GET and DELETE return 405. Requests without an Origin header are supported.
+Browser requests must use the endpoint's origin.
+
+The five tools accept strict objects and use string Discord IDs.
+
+- `create_thread` takes `channel`, `message`, `name` and optional
+  `auto_archive_duration`, with the same durations as REST.
+- `post_message` takes `channel`, `content` and optional `reply_to`.
+- `list_messages` takes `channel`, optional numeric `limit` and optional `before`.
+- `get_message` takes `channel` and `message`.
+- `add_reaction` takes `channel`, `message` and `emoji`, as Unicode or `name:id`.
+  Supply the emoji directly without URL encoding.
+
+Tools call the existing relay handler in process, preserving its guild checks,
+mention disabling, input limits and Discord error handling. There are no channel
+creation or deletion tools. Message reads include embeds. Tool results contain
+JSON text, with `isError` for relay failures. Authentication failures use HTTP
+401, or 503 when the token is unset. Successful reactions return `{"ok":true}`.
+The same write retry caveats above apply to MCP calls.
+
+Rollout needs only the app image update after merge. There is no data migration,
+secret change, deploy order dependency or cluster configuration change. Existing
+REST clients and pod probes keep their current paths and behavior. Verify
+`/readyz` and authenticated MCP initialization after rollout before configuring
+a connector. Live Discord and production connectivity are not covered by local tests.
+
 Merge the secrets PR and wait for Vault reconciliation before the deploys PR.
 Merge the app PR after the deployment configuration is ready.
 The app image updates automatically after its PR merges. An image arriving before
