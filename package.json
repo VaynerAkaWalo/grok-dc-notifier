@@ -17,6 +17,7 @@
     "typescript": "7.0.2"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "pino": "10.4.0",
     "zod": "4.6.7"
   }

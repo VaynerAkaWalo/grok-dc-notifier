@@ -1,4 +1,5 @@
 import { RelayApi } from "../api/handler.ts";
+import { RelayMcp } from "../api/mcp.ts";
 import { DiscordRestClient } from "../discord/rest-client.ts";
 import { GatewayClient } from "../gateway/client.ts";
 import { FatalGatewayError, intents } from "../gateway/protocol.ts";
@@ -20,6 +21,7 @@ export class Application {
   private readonly gateway: GatewayClient;
   private readonly health: HealthCheck;
   private readonly api: RelayApi;
+  private readonly mcp: RelayMcp;
 
   constructor(
     private readonly config: AppConfig,
@@ -27,6 +29,7 @@ export class Application {
   ) {
     const api = new DiscordRestClient({ token: config.discord.token });
     this.api = new RelayApi(api, config.relayApi.token);
+    this.mcp = new RelayMcp(this.api);
 
     const relay = createRelay({
       allowedUserIds: config.discord.allowedUserIds,
@@ -59,6 +62,8 @@ export class Application {
       maxRequestBodySize: 16_384,
       fetch: (req) => {
         const path = new URL(req.url).pathname;
+
+        if (path === "/api/mcp") return this.mcp.handle(req);
 
         return path === "/healthz" || path === "/readyz"
           ? this.health.handle(req)
