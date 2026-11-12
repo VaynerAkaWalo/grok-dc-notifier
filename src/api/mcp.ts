@@ -1,18 +1,67 @@
+import { timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import {
-  messageBody,
-  type RelayApi,
-  snowflake,
-  threadBody,
-} from "./handler.ts";
+  type DiscordRelayService,
+  GuildForbiddenError,
+} from "../discord/relay-service.ts";
+import { DiscordRequestError, NotFoundError } from "../discord/rest-client.ts";
+
+const snowflake = z.string().regex(/^[1-9]\d{0,19}$/);
+const messageBody = z.strictObject({
+  content: z.string().min(1).max(2000),
+  reply_to: snowflake.optional(),
+});
+const threadBody = z.strictObject({
+  name: z.string().trim().min(1).max(100),
+  auto_archive_duration: z
+    .union([z.literal(60), z.literal(1440), z.literal(4320), z.literal(10080)])
+    .optional(),
+});
+
+function describeFailure(error: unknown): string {
+  if (error instanceof GuildForbiddenError) return "guild forbidden";
+  if (error instanceof NotFoundError) return "Discord resource unavailable";
+  if (
+    error instanceof DiscordRequestError &&
+    [400, 429].includes(error.status)
+  ) {
+    return "Discord rejected request";
+  }
+
+  return "Discord unavailable";
+}
+
+async function toToolResult(operation: () => Promise<unknown>) {
+  try {
+    const result = await operation();
+
+    return {
+      isError: false,
+      content: [{ type: "text" as const, text: JSON.stringify(result) }],
+    };
+  } catch (error) {
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ error: describeFailure(error) }),
+        },
+      ],
+    };
+  }
+}
 
 export class RelayMcp {
-  constructor(private readonly api: RelayApi) {}
+  constructor(
+    private readonly relay: DiscordRelayService,
+    private readonly token?: string,
+  ) {}
 
   handle = async (req: Request): Promise<Response> => {
-    const unauthorized = this.api.authorize(req);
+    const unauthorized = this.authorize(req);
     if (unauthorized) return unauthorized;
 
     const origin = req.headers.get("origin");
@@ -22,34 +71,44 @@ export class RelayMcp {
     if (req.method !== "POST")
       return new Response(null, { status: 405, headers: { Allow: "POST" } });
 
-    const server = new McpServer({
-      name: "grok-dc-notifier",
-      version: "1.0.0",
-    });
+    const server = this.createServer();
     const transport = new WebStandardStreamableHTTPServerTransport({
       enableJsonResponse: true,
       maxRequestBodySize: 16_384,
     });
-    const headers = new Headers({
-      authorization: req.headers.get("authorization") ?? "",
-      "content-type": "application/json",
-    });
-    const invoke = async (method: string, path: string, body?: unknown) => {
-      const response = await this.api.handle(
-        new Request(new URL(path, req.url).href, {
-          method,
-          headers,
-          body: body === undefined ? undefined : JSON.stringify(body),
-        }),
-      );
-      const result =
-        response.status === 204 ? { ok: true } : await response.json();
 
-      return {
-        isError: !response.ok,
-        content: [{ type: "text" as const, text: JSON.stringify(result) }],
-      };
-    };
+    await server.connect(transport);
+
+    try {
+      return await transport.handleRequest(req);
+    } finally {
+      await server.close();
+    }
+  };
+
+  private authorize(req: Request): Response | undefined {
+    if (!this.token)
+      return Response.json({ error: "relay API disabled" }, { status: 503 });
+
+    const supplied = Buffer.from(req.headers.get("authorization") ?? "");
+    const expected = Buffer.from(`Bearer ${this.token}`);
+
+    if (
+      supplied.length !== expected.length ||
+      !timingSafeEqual(supplied, expected)
+    ) {
+      return Response.json(
+        { error: "unauthorized" },
+        { status: 401, headers: { "WWW-Authenticate": "Bearer" } },
+      );
+    }
+  }
+
+  private createServer(): McpServer {
+    const server = new McpServer({
+      name: "grok-dc-notifier",
+      version: "1.0.0",
+    });
 
     server.registerTool(
       "create_thread",
@@ -62,11 +121,7 @@ export class RelayMcp {
         }),
       },
       ({ channel, message, ...body }) =>
-        invoke(
-          "POST",
-          `/api/channels/${channel}/messages/${message}/threads`,
-          body,
-        ),
+        toToolResult(() => this.relay.createThread(channel, message, body)),
     );
     server.registerTool(
       "post_message",
@@ -75,8 +130,8 @@ export class RelayMcp {
           "Post a message or reply with all mention notifications disabled.",
         inputSchema: messageBody.extend({ channel: snowflake }),
       },
-      ({ channel, ...body }) =>
-        invoke("POST", `/api/channels/${channel}/messages`, body),
+      ({ channel, content, reply_to }) =>
+        toToolResult(() => this.relay.postMessage(channel, content, reply_to)),
     );
     server.registerTool(
       "list_messages",
@@ -89,13 +144,8 @@ export class RelayMcp {
           before: snowflake.optional(),
         }),
       },
-      ({ channel, limit, before }) => {
-        const query = new URLSearchParams();
-        if (limit !== undefined) query.set("limit", String(limit));
-        if (before) query.set("before", before);
-
-        return invoke("GET", `/api/channels/${channel}/messages?${query}`);
-      },
+      ({ channel, limit, before }) =>
+        toToolResult(() => this.relay.listMessages(channel, limit, before)),
     );
     server.registerTool(
       "get_message",
@@ -105,7 +155,7 @@ export class RelayMcp {
         inputSchema: z.strictObject({ channel: snowflake, message: snowflake }),
       },
       ({ channel, message }) =>
-        invoke("GET", `/api/channels/${channel}/messages/${message}`),
+        toToolResult(() => this.relay.getMessage(channel, message)),
     );
     server.registerTool(
       "add_reaction",
@@ -119,18 +169,13 @@ export class RelayMcp {
         }),
       },
       ({ channel, message, emoji }) =>
-        invoke(
-          "PUT",
-          `/api/channels/${channel}/messages/${message}/reactions/${encodeURIComponent(emoji)}`,
-        ),
+        toToolResult(async () => {
+          await this.relay.addReaction(channel, message, emoji);
+
+          return { ok: true };
+        }),
     );
 
-    await server.connect(transport);
-
-    try {
-      return await transport.handleRequest(req);
-    } finally {
-      await server.close();
-    }
-  };
+    return server;
+  }
 }

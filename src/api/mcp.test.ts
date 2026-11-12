@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { DiscordRelayService } from "../discord/relay-service.ts";
 import { DiscordRestClient } from "../discord/rest-client.ts";
-import { RelayApi } from "./handler.ts";
 import { RelayMcp } from "./mcp.ts";
 
 const token = "relay-test-token-with-at-least-32-characters";
@@ -25,6 +25,7 @@ function setup(
     guild?: string | null;
     token?: string | null;
     fail?: boolean;
+    writeStatus?: number;
   } = {},
 ) {
   const calls: { path: string; method: string; body: unknown }[] = [];
@@ -46,6 +47,8 @@ function setup(
           type: 11,
           guild_id: options.guild === undefined ? guild : options.guild,
         });
+      if (options.writeStatus && init?.method !== "GET")
+        return new Response(null, { status: options.writeStatus });
       if (path.endsWith("/@me")) return new Response(null, { status: 204 });
       if (path.endsWith("/threads"))
         return Response.json({ id: "44", type: 11, guild_id: guild });
@@ -56,7 +59,8 @@ function setup(
     }) as typeof fetch,
   });
   const mcp = new RelayMcp(
-    new RelayApi(discord, options.token === null ? undefined : token),
+    new DiscordRelayService(discord),
+    options.token === null ? undefined : token,
   );
   const server = Bun.serve({ port: 0, fetch: mcp.handle });
   cleanup.push(() => server.stop(true));
@@ -256,6 +260,41 @@ describe("Streamable HTTP MCP", () => {
     expect(result.content).toEqual([
       { type: "text", text: '{"error":"Discord unavailable"}' },
     ]);
+  });
+
+  for (const [status, error] of [
+    [400, "Discord rejected request"],
+    [429, "Discord rejected request"],
+    [403, "Discord resource unavailable"],
+    [404, "Discord resource unavailable"],
+    [500, "Discord unavailable"],
+  ] as const) {
+    test(`maps Discord write status ${status} to ${error}`, async () => {
+      const { url } = setup({ writeStatus: status });
+      const client = await connect(url);
+
+      const result = await client.callTool({
+        name: "post_message",
+        arguments: { channel: "11", content: "hello" },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([
+        { type: "text", text: JSON.stringify({ error }) },
+      ]);
+    });
+  }
+
+  test("a Discord write failure is not retried after possible partial success", async () => {
+    const { url, calls } = setup({ writeStatus: 500 });
+    const client = await connect(url);
+
+    await client.callTool({
+      name: "post_message",
+      arguments: { channel: "11", content: "hello" },
+    });
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
   });
 
   test("rejects cross-origin requests before Discord operations", async () => {
