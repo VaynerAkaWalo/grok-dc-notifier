@@ -56,6 +56,14 @@ const envSchema = z.object({
       .default("info"),
   ),
 
+  RELAY_API_TOKEN: unsetWhenBlank(
+    z
+      .string()
+      .trim()
+      .min(32, { error: "RELAY_API_TOKEN must contain at least 32 characters" })
+      .optional(),
+  ),
+
   DISCORD_BOT_TOKEN: unsetWhenBlank(required("DISCORD_BOT_TOKEN is required")),
   DISCORD_GATEWAY_URL: unsetWhenBlank(
     z

@@ -1,3 +1,4 @@
+import { RelayApi } from "../api/handler.ts";
 import { DiscordRestClient } from "../discord/rest-client.ts";
 import { GatewayClient } from "../gateway/client.ts";
 import { FatalGatewayError, intents } from "../gateway/protocol.ts";
@@ -18,15 +19,19 @@ export const ExitCode = {
 export class Application {
   private readonly gateway: GatewayClient;
   private readonly health: HealthCheck;
+  private readonly api: RelayApi;
 
   constructor(
     private readonly config: AppConfig,
     private readonly log: Logger,
   ) {
+    const api = new DiscordRestClient({ token: config.discord.token });
+    this.api = new RelayApi(api, config.relayApi.token);
+
     const relay = createRelay({
       allowedUserIds: config.discord.allowedUserIds,
       allowedGuildIds: config.discord.allowedGuildIds,
-      api: new DiscordRestClient({ token: config.discord.token }),
+      api,
       dedupe: new Dedupe(config.relay.dedupeTtlMs),
       limiter: new RateLimiter(config.relay.ratePerMinute),
       negativeTtlMs: config.relay.threadNegativeTtlMs,
@@ -51,7 +56,14 @@ export class Application {
   async run(): Promise<number> {
     const server = Bun.serve({
       port: this.config.app.port,
-      fetch: this.health.handle,
+      maxRequestBodySize: 16_384,
+      fetch: (req) => {
+        const path = new URL(req.url).pathname;
+
+        return path === "/healthz" || path === "/readyz"
+          ? this.health.handle(req)
+          : this.api.handle(req);
+      },
     });
     const shutdown = this.shutdownOnSignals();
 
