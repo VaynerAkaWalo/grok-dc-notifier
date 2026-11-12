@@ -31,6 +31,20 @@ describe("loadConfig", () => {
     expect(config.health.staleAfterMs).toBe(3 * 60_000);
   });
 
+  test("enables the relay only with a configured bearer token of at least 32 characters", () => {
+    const token = "a".repeat(40);
+
+    expect(
+      loadConfig({ ...required, RELAY_API_TOKEN: token }).relayApi.token,
+    ).toBe(token);
+    expect(
+      loadConfig({ ...required, RELAY_API_TOKEN: " " }).relayApi.token,
+    ).toBeUndefined();
+    expect(() => loadConfig({ ...required, RELAY_API_TOKEN: "short" })).toThrow(
+      "RELAY_API_TOKEN must contain at least 32 characters",
+    );
+  });
+
   test("reports every missing value", () => {
     expect(() => loadConfig({})).toThrow(
       "DISCORD_BOT_TOKEN is required; " +
@@ -72,6 +86,7 @@ describe("loadConfig", () => {
 
     expect(config).toEqual({
       app: { name: "notifier", port: 9000 },
+      relayApi: { token: undefined },
       logging: { level: "debug" },
       discord: {
         token: "t",

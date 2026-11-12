@@ -1,4 +1,4 @@
-import type { z } from "zod";
+import { z } from "zod";
 import {
   type Channel,
   channelSchema,
@@ -7,8 +7,20 @@ import {
 } from "./schemas.ts";
 
 export class NotFoundError extends Error {
-  constructor(path: string) {
+  constructor(
+    path: string,
+    readonly status = 404,
+  ) {
     super(`not found: ${path}`);
+  }
+}
+
+export class DiscordRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly retryAfter: string | null,
+  ) {
+    super(`Discord request failed with status ${status}`);
   }
 }
 
@@ -43,29 +55,90 @@ export class DiscordRestClient implements DiscordApi {
   }
 
   channel(channelId: string): Promise<Channel> {
-    return this.get(
+    return this.execute(
       `/channels/${encodeURIComponent(channelId)}`,
       channelSchema,
     );
   }
 
   message(channelId: string, messageId: string): Promise<Message> {
-    return this.get(
+    return this.execute(
       `/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`,
       messageSchema,
     );
   }
 
   messages(channelId: string, limit: number): Promise<Message[]> {
-    return this.get(
+    return this.execute(
       `/channels/${encodeURIComponent(channelId)}/messages?limit=${limit}`,
       messageSchema.array(),
     );
   }
 
-  private async get<T>(path: string, schema: z.ZodType<T>): Promise<T> {
+  relayMessage(channelId: string, messageId: string) {
+    return this.execute(
+      `/channels/${channelId}/messages/${messageId}`,
+      messageSchema.loose(),
+    );
+  }
+
+  relayMessages(channelId: string, query: URLSearchParams) {
+    return this.execute(
+      `/channels/${channelId}/messages?${query}`,
+      messageSchema.loose().array(),
+    );
+  }
+
+  createThread(
+    channelId: string,
+    messageId: string,
+    body: { name: string; auto_archive_duration?: number },
+  ) {
+    return this.execute(
+      `/channels/${channelId}/messages/${messageId}/threads`,
+      channelSchema.loose(),
+      "POST",
+      body,
+    );
+  }
+
+  postMessage(channelId: string, content: string, replyTo?: string) {
+    return this.execute(
+      `/channels/${channelId}/messages`,
+      messageSchema.loose(),
+      "POST",
+      {
+        content,
+        allowed_mentions: { parse: [], replied_user: false },
+        ...(replyTo
+          ? {
+              message_reference: {
+                message_id: replyTo,
+                channel_id: channelId,
+                fail_if_not_exists: true,
+              },
+            }
+          : {}),
+      },
+    );
+  }
+
+  addReaction(channelId: string, messageId: string, emoji: string) {
+    return this.execute(
+      `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`,
+      z.undefined(),
+      "PUT",
+    );
+  }
+
+  private async execute<T>(
+    path: string,
+    schema: z.ZodType<T>,
+    method = "GET",
+    body?: unknown,
+  ): Promise<T> {
     for (let attempt = 0; ; attempt++) {
-      const res = await this.request(path);
+      const res = await this.request(path, method, body);
 
       if (res.status === 429 && attempt < maxRateLimitRetries) {
         await res.body?.cancel();
@@ -77,28 +150,40 @@ export class DiscordRestClient implements DiscordApi {
       if (res.status === 404 || res.status === 403) {
         await res.body?.cancel();
 
-        throw new NotFoundError(path);
+        throw new NotFoundError(path, res.status);
       }
 
       if (!res.ok) {
         await res.body?.cancel();
 
-        throw new Error(`GET ${path}: status ${res.status}`);
+        throw new DiscordRequestError(
+          res.status,
+          res.headers.get("retry-after"),
+        );
       }
 
-      const parsed = schema.safeParse(await res.json());
+      const parsed = schema.safeParse(
+        res.status === 204 ? undefined : await res.json(),
+      );
 
       if (!parsed.success) {
-        throw new Error(`GET ${path}: unexpected response shape`);
+        throw new Error(`${method} ${path}: unexpected response shape`);
       }
 
       return parsed.data;
     }
   }
 
-  private request(path: string): Promise<Response> {
+  private request(
+    path: string,
+    method: string,
+    body?: unknown,
+  ): Promise<Response> {
     return this.fetch(this.baseUrl + path, {
+      method,
+      body: body === undefined ? undefined : JSON.stringify(body),
       headers: {
+        "Content-Type": "application/json",
         Authorization: `Bot ${this.options.token}`,
         "User-Agent": userAgent,
       },

@@ -9,6 +9,10 @@ export function loadConfig(source: EnvSource = Bun.env) {
       port: env.PORT,
     },
 
+    relayApi: {
+      token: env.RELAY_API_TOKEN,
+    },
+
     logging: {
       level: env.LOG_LEVEL,
     },
